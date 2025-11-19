@@ -79,11 +79,11 @@ using namespace time_literals;
 #define MB12XX_SET_ADDRESS_2                    0xA5 // Change address 2 Register.
 
 /* Device limits */
-#define MB12XX_MIN_DISTANCE                     (0.20f)
-#define MB12XX_MAX_DISTANCE                     (7.65f)
+#define MB12XX_MIN_DISTANCE                     (0.00f)
+#define MB12XX_MAX_DISTANCE                     (8.00f)
 
-#define MB12XX_MEASURE_INTERVAL                 100_ms // 60ms minimum for one sonar.
-#define MB12XX_INTERVAL_BETWEEN_SUCCESIVE_FIRES 100_ms // 30ms minimum between each sonar measurement (watch out for interference!).
+#define MB12XX_MEASURE_INTERVAL                 5_ms // 60ms minimum for one sonar.
+#define MB12XX_INTERVAL_BETWEEN_SUCCESIVE_FIRES 5_ms // 30ms minimum between each sonar measurement (watch out for interference!).
 
 class MB12XX : public device::I2C, public ModuleParams, public I2CSPIDriver<MB12XX>
 {
@@ -196,54 +196,63 @@ MB12XX::~MB12XX()
 int
 MB12XX::collect()
 {
-	perf_begin(_sample_perf);
-	uint8_t val[2] = {};
+    perf_begin(_sample_perf);
+    uint8_t val[2] = {};
 
-	// Increment i2c adress to next sensor.
-	_sensor_index++;
-	_sensor_index %= _sensor_count;
+    // Increment i2c address to next sensor.
+    _sensor_index++;
+    _sensor_index %= _sensor_count;
 
-	// Set the sensor i2c adress for the active cycle.
-	set_device_address(_sensor_addresses[_sensor_index]);
+    // Set the sensor i2c address for the active cycle.
+    set_device_address(_sensor_addresses[_sensor_index]);
 
-	// Transfer data from the bus.
-	int ret_val = transfer(nullptr, 0, &val[0], 2);
+    // Transfer data from the bus.
+    int ret_val = transfer(nullptr, 0, &val[0], 2);
 
-	if (ret_val < 0) {
-		PX4_ERR("sensor %i read failed, address: 0x%02X", _sensor_index, get_device_address());
-		perf_count(_comms_error);
-		perf_end(_sample_perf);
-		return ret_val;
-	}
+    if (ret_val < 0) {
+        PX4_ERR("sensor %i read failed, address: 0x%02X", _sensor_index, get_device_address());
+        perf_count(_comms_error);
+        perf_end(_sample_perf);
+        return ret_val;
+    }
 
-	uint16_t distance_cm = val[0] << 8 | val[1];
-	float distance_m = static_cast<float>(distance_cm) * 1e-2f;
+    uint16_t distance_cm = val[0] << 8 | val[1];
+    float distance_m = static_cast<float>(distance_cm) * 1e-2f;
 
-	distance_sensor_s report;
-	report.current_distance = distance_m;
-	report.device_id        = get_device_id();
-	report.max_distance     = MB12XX_MAX_DISTANCE;
-	report.min_distance     = MB12XX_MIN_DISTANCE;
-	report.orientation      = _sensor_rotations[_sensor_index];
-	report.signal_quality   = -1;
-	report.timestamp        = hrt_absolute_time();
-	report.type             = distance_sensor_s::MAV_DISTANCE_SENSOR_ULTRASOUND;
-	report.variance         = 0.0f;
+    // Check if the current distance exceeds 1000 cm and use last valid distance if true
+    static float last_valid_distance = 0.0f; // Store the last valid distance
+    if (distance_m > 1000) {
+        distance_m = last_valid_distance; // Use the last valid distance if the current is greater than 1000 cm
+    } else {
+        last_valid_distance = distance_m; // Update the last valid distance
+    }
 
-	int instance_id;
-	orb_publish_auto(ORB_ID(distance_sensor), &_distance_sensor_topic, &report, &instance_id);
+    distance_sensor_s report;
+    report.current_distance = distance_m;
+    report.device_id        = get_device_id();
+    report.max_distance     = MB12XX_MAX_DISTANCE;
+    report.min_distance     = MB12XX_MIN_DISTANCE;
+    report.orientation      = distance_sensor_s::ROTATION_DOWNWARD_FACING;
+    report.signal_quality   = 100;
+    report.timestamp        = hrt_absolute_time();
+    report.type             = distance_sensor_s::MAV_DISTANCE_SENSOR_LASER;
+    report.variance         = 0.0f;
 
-	// Begin the next measurement.
-	if (measure() != PX4_OK) {
-		PX4_INFO("sensor %i measurement error, address 0x%02X", _sensor_index, get_device_address());
-		perf_count(_comms_error);
-		perf_end(_sample_perf);
-		return ret_val;
-	}
+    int instance_id;
+    orb_publish_auto(ORB_ID(distance_sensor), &_distance_sensor_topic, &report, &instance_id);
 
-	perf_end(_sample_perf);
-	return PX4_OK;
+    // Begin the next measurement.
+    if (measure() != PX4_OK) {
+        PX4_INFO("sensor %i measurement error, address 0x%02X", _sensor_index, get_device_address());
+        perf_count(_comms_error);
+        perf_end(_sample_perf);
+        return ret_val;
+    }
+
+    perf_end(_sample_perf);
+    return PX4_OK;
 }
+
 
 int
 MB12XX::get_sensor_rotation(const size_t index)
